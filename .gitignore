@@ -1,0 +1,7 @@
+pyvenv.cfg
+./Lib/*
+./Scripts/*
+./results/*
+./share/*
+./Include/*
+survey_analyzer_original.py
