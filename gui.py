@@ -1,5 +1,6 @@
 import customtkinter as ctk
 import os
+import webbrowser
 from CTkMessagebox import CTkMessagebox
 from survey_analyzer import SurveyAnalyzer
 from CTkToolTip import *
@@ -31,7 +32,7 @@ class MainWindow(ctk.CTk):
         'Optional: Use the dropdown menu at the bottom to open the PDF files directly from this programme.',justify='left')
         self.explanatory_label.grid(row=0,column=0,padx=10,pady=(5,5))
         # Configure a drop-in read file
-        self.input_output_frame = ctk.CTkFrame(self)
+        self.input_output_frame = ctk.CTkFrame(self, fg_color="transparent")
         self.input_output_frame.pack(padx=5,pady=(2.5,2.5),fill='both')#grid(row=1,column=0,padx=10,pady=(5,5),sticky='nwe')
         self.label_input_path = ctk.CTkLabel(self.input_output_frame,text=self.input_path.get())
         self.label_output_path = ctk.CTkLabel(self.input_output_frame,text=self.output_path.get())
@@ -42,14 +43,14 @@ class MainWindow(ctk.CTk):
         self.label_input_path.grid(row=0,column=1,padx=10,pady=(5,5),sticky='w')
         self.label_output_path.grid(row=1,column=1,padx=10,pady=(5,5),sticky='w')
         # Checkbox for summary of suggestion/topic comments
-        self.il_frame = ctk.CTkFrame(self)
+        self.il_frame = ctk.CTkFrame(self, fg_color="transparent")
         self.il_frame.pack(padx=5,pady=(2.5,2.5),fill='both')
         self.il_frame.grid_columnconfigure(1, weight=1)
         self.il_label = ctk.CTkLabel(self.il_frame, text='Enter industry lecture title: ')
         self.il_input_box = ctk.CTkEntry(self.il_frame)
         self.il_label.grid(row=0,column=0,padx=10,pady=(5,5),sticky='w')
         self.il_input_box.grid(row=0,column=1,padx=5,pady=(5,5),sticky='ew')
-        self.checkbox_frame = ctk.CTkFrame(self)
+        self.checkbox_frame = ctk.CTkFrame(self, fg_color="transparent")
         self.checkbox_frame.pack(padx=5,pady=(2.5,2.5),fill='both')
         self.checkbox_frame.grid_columnconfigure(2, weight=1)
         self.checkbox = ctk.CTkCheckBox(
@@ -68,7 +69,7 @@ class MainWindow(ctk.CTk):
         self.info_icon.grid(row=0, column=1, padx=1,sticky='w')
         self.perform_analysis.grid(row=0,column=3,padx=10,pady=(5,5),sticky='e')
         # Footer row: PDF dropdown + About button
-        self.footer_frame = ctk.CTkFrame(self)
+        self.footer_frame = ctk.CTkFrame(self, fg_color="transparent")
         self.footer_frame.pack(padx=5, pady=(2.5, 5), fill='both')
         self.footer_frame.grid_columnconfigure(0, weight=1)
 
@@ -93,19 +94,56 @@ class MainWindow(ctk.CTk):
         # Erstelle ein neues Fenster
         about_win = ctk.CTkToplevel(self)
         about_win.title("About this app")
-        about_win.geometry("300x200")
+        about_win.minsize(320, 220)
 
         # Verhindert, dass das Hauptfenster bedient werden kann (optional)
-        about_win.grab_set() 
+        about_win.grab_set()
 
-        # Inhalt hinzufügen
+        # Inhalt hinzufuegen
         title_label = ctk.CTkLabel(about_win, text="HGSFP Survey Tool", font=("Arial", 16, "bold"))
-        title_label.pack(pady=10)
-        info_text = "Created by: Hagen-Wolfgang Bühler\nVersion: 1.0.0\nContact: ad277@uni-heidelberg.de\nFurther information:_githublink_"
-        content_label = ctk.CTkLabel(about_win, text=info_text)
-        content_label.pack(pady=10)
+        title_label.pack(padx=10, pady=6, anchor="w")
+
+        details_frame = ctk.CTkFrame(about_win, fg_color="transparent")
+        details_frame.pack(padx=10, pady=1)
+
+        created_label = ctk.CTkLabel(details_frame, text="Created by: Hagen-Wolfgang Buehler")
+        created_label.pack(pady=1, anchor="w")
+
+        version_label = ctk.CTkLabel(details_frame, text="Version: 1.0.0")
+        version_label.pack(pady=1, anchor="w")
+
+        contact_row = ctk.CTkFrame(details_frame, fg_color="transparent")
+        contact_row.pack(pady=1, anchor="w")
+        contact_label = ctk.CTkLabel(contact_row, text="Contact: ")
+        contact_label.pack(side="left")
+        email_label = ctk.CTkLabel(contact_row, text="ad277@uni-heidelberg.de", text_color="#1f538d", cursor="hand2")
+        email_label.pack(side="left")
+        email_label.bind("<Enter>", lambda e: email_label.configure(text_color="#14375e"))
+        email_label.bind("<Leave>", lambda e: email_label.configure(text_color="#1f538d"))
+        email_label.bind("<Button-1>", lambda e: self.open_link("mailto:ad277@uni-heidelberg.de"))
+        info_row = ctk.CTkFrame(details_frame, fg_color="transparent")
+        info_row.pack(pady=1, anchor="w")
+        info_label = ctk.CTkLabel(info_row, text="Further information: ")
+        info_label.pack(side="left")
+        github_label = ctk.CTkLabel(
+            info_row,
+            text="https://github.com/hwbuehler/hgsfp-survey-tool/tree/main#",
+            text_color="#1f538d",
+            cursor="hand2",
+        )
+        github_label.pack(side="left")
+        github_label.bind("<Enter>", lambda e: github_label.configure(text_color="#14375e"))
+        github_label.bind("<Leave>", lambda e: github_label.configure(text_color="#1f538d"))
+        github_label.bind("<Button-1>", lambda e: self.open_link("https://github.com/hwbuehler/hgsfp-survey-tool/tree/main#"))
+
         close_button = ctk.CTkButton(about_win, text="Close", command=about_win.destroy)
-        close_button.pack(pady=10)
+        close_button.pack(padx=10, pady=6)
+
+        about_win.update_idletasks()
+        about_win.minsize(about_win.winfo_reqwidth(), about_win.winfo_reqheight())
+
+    def open_link(self, url):
+        webbrowser.open_new_tab(url)
 
     def OpenFile(self, choice=None) -> None:
         name_in_list = self.dropdown.get()
