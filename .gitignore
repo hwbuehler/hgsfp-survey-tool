@@ -1,4 +1,5 @@
 pyvenv.cfg
+__pycache__
 Lib/
 Scripts/
 results/
