@@ -12,6 +12,8 @@ from typing import List, Dict, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 from fpdf import FPDF
+from fpdf import FontFace
+from fpdf.enums import CellBordersLayout, TableCellFillMode
 from pypdf import PdfReader, PdfWriter
 from sentence_transformers import SentenceTransformer
 from sklearn.cluster import AgglomerativeClustering
@@ -76,6 +78,8 @@ class SurveyAnalyzer:
         self.dna_morning = 0
         self.dna_afternoon = 0
         self.dna_il = 0
+        # Dictionaries containing mean and standard deviation for each question and lecture timeslot
+        self.statistics = {}
         self.language_model = SentenceTransformer("all-MiniLM-L6-v2")
 
     def _read_data(self, data_path: str | None = None) -> Tuple[List[Dict],int]:
@@ -203,7 +207,7 @@ class SurveyAnalyzer:
     def _labels_for_question(self, question: str) -> Tuple[str, ...]:
         return self.constants.labels_level if question == "level" else self.constants.labels
 
-    def _calculate_lecture_statistics(self, results_dict: Dict[str, Dict[str, List[int]]]) -> Dict[str, List[List[float]]]:
+    def _calculate_lecture_statistics(self, results_dict: Dict[str, Dict[str, List[int]]]) -> None:
         """
         Calculate mean and standard deviation for all questions in each lecture.
         
@@ -215,7 +219,6 @@ class SurveyAnalyzer:
         Returns:
             Dictionary with structure {lecture_title: [[means for Q1-Q6], [stds for Q1-Q6]]}
         """
-        statistics = {}
         for lecture_title, questions_dict in results_dict.items():
             means = []
             stds = []
@@ -228,8 +231,65 @@ class SurveyAnalyzer:
                 else:
                     means.append(None)
                     stds.append(None)
-            statistics[lecture_title] = [means, stds]
-        return statistics
+            self.statistics[lecture_title] = [means, stds]
+
+    def _create_statistics_table_page(self, lecture_key: str) -> io.BytesIO:
+        """Create a one-page PDF table of question means and standard deviations.
+
+        The table has two rows:
+        - Row 0: question numbers (1-6)
+        - Row 1: mean ± std for the corresponding question
+
+        Below the table we add a note about the Likert scale.
+        """
+        stats = self.statistics.get(lecture_key)
+
+        pdf_stats = FPDF(orientation="landscape")
+        pdf_stats.add_page()
+        pdf_stats.set_font("Helvetica", style="B", size=18)
+        pdf_stats.write(text="Question Statistics\n\n")
+
+        # Two columns: Question label + Mean±Std value
+        table_width = int(pdf_stats.w - 2 * pdf_stats.l_margin)
+        col_widths = (int(table_width * 0.65), int(table_width * 0.35))
+
+        headings_style = FontFace(emphasis="BOLD", color=255, fill_color=(255, 100, 0))
+        with pdf_stats.table(
+            borders_layout="NO_HORIZONTAL_LINES",
+            cell_fill_color=(224, 235, 255),
+            cell_fill_mode=TableCellFillMode.ROWS,
+            col_widths=col_widths,
+            headings_style=headings_style,
+            line_height=8,
+            text_align="LEFT",
+            width=table_width,
+        ) as table:
+            # Header row (only row with a horizontal separator below it)
+            row = table.row()
+            row.cell("Question", border=CellBordersLayout.BOTTOM)
+            row.cell("Mean ± Std", border=CellBordersLayout.BOTTOM)
+
+            # Data rows: each question gets its own row
+            if stats is None:
+                for question in self.constants.answer_titles:
+                    row = table.row()
+                    row.cell(question, border=CellBordersLayout.NONE)
+                    row.cell("N/A", border=CellBordersLayout.NONE)
+            else:
+                means, stds = stats
+                for question, mean, std in zip(self.constants.answer_titles, means, stds):
+                    row = table.row()
+                    row.cell(question, border=CellBordersLayout.NONE)
+                    if mean is None or std is None:
+                        row.cell("N/A", border=CellBordersLayout.NONE)
+                    else:
+                        row.cell(f"{mean:.2f} ± {std:.2f}", border=CellBordersLayout.NONE)
+
+        pdf_stats.ln(6)
+        pdf_stats.set_font("Helvetica", size=10)
+        pdf_stats.write(text="Likert rating scheme: 1 (most negative) to 5 (most positive).\n")
+
+        return io.BytesIO(pdf_stats.output())
 
     def _create_likert_figure(self, results_dict: Dict[str, List[int]], title: str) -> io.BytesIO:
         """
@@ -303,9 +363,11 @@ class SurveyAnalyzer:
             img_buf = self._create_likert_figure(lecture_dict, title)
             pdf_output = self._write_pdf_with_graphs(title, total, img_buf)
             figure_page = PdfReader(pdf_output).pages[0]
+            stats_page = PdfReader(self._create_statistics_table_page(self.il_title)).pages[0]
             comment_page = PdfReader(self._create_comment_pdf(lecture_dict["comments"])).pages[0]
             writer = PdfWriter()
             writer.add_page(figure_page)
+            writer.add_page(stats_page)
             writer.add_page(comment_page)
             output_path = path + f"results_{self.il_title.lower().replace(' ','_')}.pdf"
             writer.write(output_path)
@@ -325,9 +387,11 @@ class SurveyAnalyzer:
                 img_buf = self._create_likert_figure(lecture_dict[lecture], title)
                 pdf_output = self._write_pdf_with_graphs(title, total, img_buf)
                 figure_page = PdfReader(pdf_output).pages[0]
+                stats_page = PdfReader(self._create_statistics_table_page(lecture)).pages[0]
                 comment_page = PdfReader(self._create_comment_pdf(lecture_dict[lecture]["comments"])).pages[0]
                 writer = PdfWriter()
                 writer.add_page(figure_page)
+                writer.add_page(stats_page)
                 writer.add_page(comment_page)
                 output_path = path + f"results_{lecture.lower().replace(' ','_')}.pdf"
                 writer.write(output_path)
@@ -389,6 +453,10 @@ class SurveyAnalyzer:
     def _perform_automated_analysis(self) -> None:
         self._fill_results_list()
         self._create_overall_results()
+        self._calculate_lecture_statistics(self.ml_results)
+        self._calculate_lecture_statistics(self.al_results)
+        self._calculate_lecture_statistics({self.il_title: self.il_results})
+        print(self.statistics)
         if os.path.exists(self.path_out):
             self._create_results_pdf(self.ml_results, self.path_out)
             self._create_results_pdf(self.al_results, self.path_out)
