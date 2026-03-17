@@ -16,6 +16,8 @@ from fpdf import FontFace
 from fpdf.enums import CellBordersLayout, TableCellFillMode
 from pypdf import PdfReader, PdfWriter
 from sentence_transformers import SentenceTransformer
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_PATH = os.path.join(BASE_DIR, "models", "all-MiniLM-L6-v2")
 from sklearn.cluster import AgglomerativeClustering
 
 
@@ -80,7 +82,7 @@ class SurveyAnalyzer:
         self.dna_il = 0
         # Dictionaries containing mean and standard deviation for each question and lecture timeslot
         self.statistics = {}
-        self.language_model = SentenceTransformer("all-MiniLM-L6-v2")
+        self.language_model = SentenceTransformer(MODEL_PATH)
 
     def _read_data(self, data_path: str | None = None) -> Tuple[List[Dict],int]:
         """
@@ -290,28 +292,60 @@ class SurveyAnalyzer:
         pdf_stats.write(text="Likert rating scheme: 1 (most negative) to 5 (most positive).\n")
 
         return io.BytesIO(pdf_stats.output())
-
+    
     def _create_likert_figure(self, results_dict: Dict[str, List[int]], title: str) -> io.BytesIO:
-        """
-        Change: factored out repeated plotting logic into a single helper to reduce duplication.
-        Returns an in-memory PNG of the figure.
-        """
-        fig, axes = plt.subplots(nrows=len(self.constants.answ_keys[:-1]), ncols=1, figsize=(11, 6))
-        axes = axes.flatten()
+        # Landscape A4 in inches
+        FIG_W, FIG_H = 11.69, 8.27
+
+        # How much vertical space (in figure-fraction) to reserve for the paragraph above
+        TOP_MARGIN    = 0.08   # blank top edge
+        BOTTOM_MARGIN = 0.05   # blank bottom edge
+        PARA_HEIGHT   = 0.10   # paragraph sits here — caller draws it separately,
+                               # so we just leave this space empty at the top
+
+        n_q = len(self.constants.answ_keys[:-1])
+
+        # Divide remaining height equally among questions
+        usable_height = 1.0 - TOP_MARGIN - BOTTOM_MARGIN - PARA_HEIGHT
+        slot_h = usable_height / n_q          # total slot per question
+        bar_frac  = 0.65                      # fraction of slot used by bar axes
+        stat_frac = 0.20                      # fraction used by stats text axes
+
+        LEFT   = 0.03
+        WIDTH  = 0.94
+
+        fig = plt.figure(figsize=(FIG_W, FIG_H))
+
         for i, question in enumerate(self.constants.answ_keys[:-1]):
-            axes[i].invert_yaxis()
-            axes[i].axis("off")
-            axes[i].set_xlim(0, 100)
-            labels = self._labels_for_question(question)
+            # Slots are numbered top-to-bottom, so invert for matplotlib's
+            # bottom-origin coordinate system
+            slot_bottom = 1.0 - TOP_MARGIN - PARA_HEIGHT - (i + 1) * slot_h
+
+            bar_bottom  = slot_bottom + (1.0 - bar_frac - stat_frac) * slot_h
+            stat_bottom = slot_bottom + (1.0 - bar_frac - stat_frac * 1.4) * slot_h
+
+            ax_bar  = fig.add_axes((LEFT, bar_bottom,  WIDTH, bar_frac  * slot_h))
+            ax_stat = fig.add_axes((LEFT, stat_bottom, WIDTH, stat_frac * slot_h))
+
+            # ── bar axes ──────────────────────────────────────────────────────
+            ax_bar.invert_yaxis()
+            ax_bar.axis("off")
+            ax_bar.set_xlim(0, 100)
+
+            labels      = self._labels_for_question(question)
             results_arr = results_dict[question]
-            n = len(results_arr)
-            # Based on Ozgur Vatansever's post, retrieved at 04.06.2026: Source - https://stackoverflow.com/a/28663910
+            n           = len(results_arr)
+
             _, answers = np.unique(results_arr, return_counts=True)
-            pct = np.round((answers / n) * 100, decimals=1)
-            pct_label = [f"{pct[k]}%" for k in range(len(pct)) if pct[k] != 0]
-            start_pct = [pct[:j].sum() for j in range(len(pct))]
-            axes[i].set_title(f"Question {i+1}: {self.constants.answer_titles[i]}", loc="left")
-            rects = axes[i].barh(
+            pct        = np.round((answers / n) * 100, decimals=1)
+            pct_label  = [f"{k+1} ({pct[k]}%)" for k in range(len(pct)) if pct[k] != 0]
+            start_pct  = [pct[:j].sum() for j in range(len(pct))]
+
+            ax_bar.set_title(
+                f"Question {i+1}: {self.constants.answer_titles[i]}",
+                loc="left", pad=4, fontsize=9
+            )
+            rects = ax_bar.barh(
                 np.full(len(pct), 0),
                 width=pct,
                 left=start_pct,
@@ -319,17 +353,41 @@ class SurveyAnalyzer:
                 color=self.constants.likert_palette,
                 linewidth=0.02,
             )
-            axes[i].bar_label(rects, labels=pct_label, label_type="center")
-            axes[i].legend(
+            ax_bar.bar_label(rects, labels=pct_label, label_type="center", fontsize=8)
+            ax_bar.legend(
                 ncols=len(labels),
                 handles=rects,
                 labels=labels,
                 bbox_to_anchor=(1.0, 1.08),
                 loc="lower right",
-                bbox_transform=axes[i].transAxes,
+                bbox_transform=ax_bar.transAxes,
                 fontsize="small",
             )
-        plt.tight_layout()
+
+            # ── stats axes ────────────────────────────────────────────────────
+            if n>5:
+                mean = np.mean(results_arr)
+                std  = np.std(results_arr)
+
+                ax_stat.axis("off")
+                ax_stat.text(
+                    0.0, 0.1,
+                    f"Mean and standard deviation: ${mean:.1f} \\pm {std:.1f}$",
+                    transform=ax_stat.transAxes,
+                    va="center", ha="left",
+                    fontsize=8, color="black",
+                )
+            else:
+                ax_stat.axis("off")
+                ax_stat.text(
+                    0.0, 0.1,
+                    f"Not enough votes for meaningful statistics.",
+                    transform=ax_stat.transAxes,
+                    va="center", ha="left",
+                    fontsize=8, color="black",
+                )
+
+
         img_buf = self._save_image_in_ram(fig)
         plt.close(fig)
         return img_buf
@@ -363,11 +421,9 @@ class SurveyAnalyzer:
             img_buf = self._create_likert_figure(lecture_dict, title)
             pdf_output = self._write_pdf_with_graphs(title, total, img_buf)
             figure_page = PdfReader(pdf_output).pages[0]
-            stats_page = PdfReader(self._create_statistics_table_page(self.il_title)).pages[0]
             comment_page = PdfReader(self._create_comment_pdf(lecture_dict["comments"])).pages[0]
             writer = PdfWriter()
             writer.add_page(figure_page)
-            writer.add_page(stats_page)
             writer.add_page(comment_page)
             output_path = path + f"results_{self.il_title.lower().replace(' ','_')}.pdf"
             writer.write(output_path)
@@ -387,11 +443,9 @@ class SurveyAnalyzer:
                 img_buf = self._create_likert_figure(lecture_dict[lecture], title)
                 pdf_output = self._write_pdf_with_graphs(title, total, img_buf)
                 figure_page = PdfReader(pdf_output).pages[0]
-                stats_page = PdfReader(self._create_statistics_table_page(lecture)).pages[0]
                 comment_page = PdfReader(self._create_comment_pdf(lecture_dict[lecture]["comments"])).pages[0]
                 writer = PdfWriter()
                 writer.add_page(figure_page)
-                writer.add_page(stats_page)
                 writer.add_page(comment_page)
                 output_path = path + f"results_{lecture.lower().replace(' ','_')}.pdf"
                 writer.write(output_path)
@@ -456,7 +510,6 @@ class SurveyAnalyzer:
         self._calculate_lecture_statistics(self.ml_results)
         self._calculate_lecture_statistics(self.al_results)
         self._calculate_lecture_statistics({self.il_title: self.il_results})
-        print(self.statistics)
         if os.path.exists(self.path_out):
             self._create_results_pdf(self.ml_results, self.path_out)
             self._create_results_pdf(self.al_results, self.path_out)

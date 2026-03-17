@@ -1,8 +1,10 @@
 pyvenv.cfg
+todos.txt
 __pycache__
 Lib/
 Scripts/
 results/
 share/
 Include/
+models/
 survey_analyzer_original.py
