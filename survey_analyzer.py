@@ -76,6 +76,8 @@ class SurveyAnalyzer:
         self.constants = SurveyConstants()
         self.ml_results, self.al_results, self.il_results = self._initialize_results_list()
         self.overall_results = self._create_lecture_dictionary()
+        self.overall_morning = self._create_lecture_dictionary()
+        self.overall_afternoon = self._create_lecture_dictionary()
         self.organization: List[str] = []
         self.topics: List[str] = []
         self.dna_morning = 0
@@ -127,6 +129,22 @@ class SurveyAnalyzer:
             combined.extend(self.il_results[question])
             self.overall_results[question] = combined
         self.overall_results.pop("comments", None)
+
+    def _create_overall_morning(self):
+        for question in self.constants.answ_keys[:-1]:
+            combined: List[int] = []
+            for lecture in self.ml_results.values():
+                combined.extend(lecture[question])
+            self.overall_morning[question]=combined
+        self.overall_morning.pop("comments", None)
+
+    def _create_overall_afternoon(self):
+        for question in self.constants.answ_keys[:-1]:
+            combined: List[int] = []
+            for lecture in self.al_results.values():
+                combined.extend(lecture[question])
+            self.overall_afternoon[question]=combined
+        self.overall_afternoon.pop("comments", None)
 
     def _initialize_results_list(self) -> Tuple[Dict[str, Dict], Dict[str, Dict], Dict[str, List]]:
         """
@@ -404,7 +422,7 @@ class SurveyAnalyzer:
         plt.close(fig)
         return img_buf
 
-    def _write_pdf_with_graphs(self, title: str, total_count: int, img_buf: io.BytesIO, overall : bool = False) -> io.BytesIO:
+    def _write_pdf_with_graphs(self, title: str, total_count: int, img_buf: io.BytesIO, overall : bool = False, dna : int = 0) -> io.BytesIO:
         """
         Change: extracted PDF rendering for graphs into a helper to remove duplication.
         """
@@ -415,8 +433,7 @@ class SurveyAnalyzer:
         pdf_graphs.write(text=f"{title}\n\n")
         pdf_graphs.set_font("dejavu-sans", size=18)
         if overall:
-            pdf_graphs.write(text=f"A total of {self.overall_count} questionnaires have been submitted.")
-            pdf_graphs.write(text=f'The percentages for each question are calculated based on the sum of it\'s been answered, i.e. {total_count}.')
+            pdf_graphs.write(text=f"A total of {total_count} questionnaires have been submitted and {dna} students did not attend the lecture(s).")
         else:
             pdf_graphs.write(text=f"A total of {total_count} questionnaires have been submitted.")
         image_y = pdf_graphs.get_y() + 6
@@ -432,7 +449,7 @@ class SurveyAnalyzer:
             title = f"Survey Results for {self.il_title}"
             total = len(lecture_dict["interesting"])
             img_buf = self._create_likert_figure(lecture_dict, title)
-            pdf_output = self._write_pdf_with_graphs(title, total, img_buf)
+            pdf_output = self._write_pdf_with_graphs(title, total, img_buf, True, dna=self.dna_il)
             figure_page = PdfReader(pdf_output).pages[0]
             comment_page = PdfReader(self._create_comment_pdf(lecture_dict["comments"])).pages[0]
             writer = PdfWriter()
@@ -441,15 +458,33 @@ class SurveyAnalyzer:
             output_path = path + f"results_{self.il_title.lower().replace(' ','_')}.pdf"
             writer.write(output_path)
         elif lecture_dict is self.overall_results:
-            title = "Overall Survey Results"
-            total = len(lecture_dict["interesting"])
-            img_buf = self._create_likert_figure(lecture_dict, title)
-            pdf_output = self._write_pdf_with_graphs(title, total, img_buf, True)
-            figure_pages = PdfReader(pdf_output).pages[0]
-            comment_pages = PdfReader(self._create_orga_topic_pdf()).pages[0]
+            # overall survey results page
+            img_buf = self._create_likert_figure(lecture_dict, "Overall Survey Results")
+            pdf_output = self._write_pdf_with_graphs("Overall Survey Results", self.overall_count, img_buf)
+            overall_pages = PdfReader(pdf_output).pages[0]
+            # overall morning lectures results page
+            self._create_overall_morning()
+            img_buf = self._create_likert_figure(self.overall_morning, "Overall Morning Lecture Results")
+            total = len(self.overall_morning['interesting'])
+            pdf_output = self._write_pdf_with_graphs("Overall Morning Lecture Results", total, img_buf, True, dna=self.dna_morning)
+            morning_pages = PdfReader(pdf_output).pages[0]
+            # overall afternoon lectures results page
+            self._create_overall_afternoon()
+            img_buf = self._create_likert_figure(self.overall_afternoon, "Overall Afternoon Lecture Results")
+            total = len(self.overall_afternoon['interesting'])
+            pdf_output = self._write_pdf_with_graphs("Overall Morning Lecture Results", total, img_buf, True, dna=self.dna_afternoon)
+            afternoon_pages = PdfReader(pdf_output).pages[0]
+            # read in other necessary pages
+            industry_pages = PdfReader(path + f"results_{self.il_title.lower().replace(' ','_')}.pdf").pages[0]
+            comment_pages = PdfReader(self._create_orga_topic_pdf()).pages
+            # write everythin to one output pdf 
             writer = PdfWriter()
-            writer.add_page(figure_pages)
-            writer.add_page(comment_pages)
+            writer.add_page(overall_pages)
+            writer.add_page(morning_pages)
+            writer.add_page(afternoon_pages)
+            writer.add_page(industry_pages)
+            for page in comment_pages:
+                writer.add_page(page)
             output_path = path + "results_overall.pdf"
             writer.write(output_path)
         else:
@@ -479,7 +514,7 @@ class SurveyAnalyzer:
         pdf_out.set_font("dejavu-sans", style="B", size=18)
         pdf_out.write(text="Clustered General Comments\n\n")
         pdf_out.set_font("dejavu-sans", size=10)
-        pdf_out.write(text="The clustering has been performed using the \"all-MiniLM-L6-v2\" sentence transformer model from https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2.\n")
+        pdf_out.write(text="The clustering has been performed using the \"all-MiniLM-L6-v2\" sentence transformer model available at https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2.\n\n")
         for txt in comments_orga_clustered:
             pdf_out.set_font("zapfdingbats", size=8)
             pdf_out.cell(w=5, h=5, text="l ")
@@ -492,7 +527,7 @@ class SurveyAnalyzer:
         pdf_out.set_font("dejavu-sans", style="B", size=18)
         pdf_out.write(text="Clustered Topic Suggestions\n\n")
         pdf_out.set_font("dejavu-sans", size=10)
-        pdf_out.write(text="The clustering has been performed using the \"all-MiniLM-L6-v2\" sentence transformer model from https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2.\n")
+        pdf_out.write(text="The clustering has been performed using the \"all-MiniLM-L6-v2\" sentence transformer model available at https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2.\n\n")
         for txt in comments_topics_clustered:
             pdf_out.set_font("zapfdingbats", size=8)
             pdf_out.cell(w=5, h=5, text="l ")
@@ -535,7 +570,6 @@ class SurveyAnalyzer:
             self._create_results_pdf(self.al_results, self.path_out)
             self._create_results_pdf(self.il_results, self.path_out)
             self._create_results_pdf(self.overall_results, self.path_out)
-            self._create_orga_topic_pdf()
         else:
             os.makedirs(self.path_out)
             self._perform_automated_analysis()
