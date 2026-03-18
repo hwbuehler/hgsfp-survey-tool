@@ -1,5 +1,6 @@
 pyvenv.cfg
-todos.txt
+todos.md 
+survey_50.json
 __pycache__
 Lib/
 Scripts/

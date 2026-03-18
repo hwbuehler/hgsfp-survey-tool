@@ -65,12 +65,11 @@ class SurveyConstants:
 
 
 class SurveyAnalyzer:
-    def __init__(self, il_title: str = "IL1", data_path: str | None = None, output_path: str | None = None) -> None:
+    def __init__(self, data_path: str | None = None, output_path: str | None = None) -> None:
         # Change: allow passing an explicit data path to make the class easier to reuse/test.
         self.data, self.overall_count = self._read_data(data_path)
         self.path_out = os.path.join(output_path if output_path is not None else sys.argv[2], "")
-        self.ml_titles, self.al_titles = self._determine_lecture_titles()
-        self.il_title = il_title
+        self.ml_titles, self.al_titles, self.il_title = self._determine_lecture_titles()
         self.constants = SurveyConstants()
         self.ml_results, self.al_results, self.il_results = self._initialize_results_list()
         self.overall_results = self._create_lecture_dictionary()
@@ -117,16 +116,21 @@ class SurveyAnalyzer:
             overall_count = jfile["ResultCount"]
         return data_tmp, overall_count
 
-    def _determine_lecture_titles(self) -> Tuple[set[str], set[str]]:
+    def _determine_lecture_titles(self) -> Tuple[set[str], set[str], set[str]]:
         """
         Extract morning and afternoon lecture titles.
         """
         ml_titles_tmp = set()
         al_titles_tmp = set()
+        il_title_tmp = set()
         for entry in self.data:
-            ml_titles_tmp.add(entry["ml_title"])
-            al_titles_tmp.add(entry["al_title"])
-        return ml_titles_tmp, al_titles_tmp
+            if entry["ml_title"]!="DnA":
+                ml_titles_tmp.add(entry["ml_title"])
+            if entry["al_title"]!="DnA":
+                al_titles_tmp.add(entry["al_title"])
+            if entry["il_title"]!="DnA":
+                il_title_tmp.add(entry["il_title"])
+        return ml_titles_tmp, al_titles_tmp, il_title_tmp
 
     def _create_lecture_dictionary(self) -> Dict[str, List[int]]:
         """
@@ -142,7 +146,8 @@ class SurveyAnalyzer:
                 combined.extend(self.ml_results[title][question])
             for title in self.al_titles:
                 combined.extend(self.al_results[title][question])
-            combined.extend(self.il_results[question])
+            for title in self.il_title:
+                combined.extend(self.il_results[title][question])
             self.overall_results[question] = combined
         self.overall_results.pop("comments", None)
 
@@ -162,13 +167,13 @@ class SurveyAnalyzer:
             self.overall_afternoon[question]=combined
         self.overall_afternoon.pop("comments", None)
 
-    def _initialize_results_list(self) -> Tuple[Dict[str, Dict], Dict[str, Dict], Dict[str, List]]:
+    def _initialize_results_list(self) -> Tuple[Dict[str, Dict], Dict[str, Dict], Dict[str, Dict]]:
         """
         Initialize lecture result dictionaries.
         """
         ml_results_tmp = {elem: self._create_lecture_dictionary() for elem in self.ml_titles}
         al_results_tmp = {elem: self._create_lecture_dictionary() for elem in self.al_titles}
-        il_results_tmp = self._create_lecture_dictionary()
+        il_results_tmp = {elem:self._create_lecture_dictionary() for elem in self.il_title}
         return ml_results_tmp, al_results_tmp, il_results_tmp
 
     def _fill_results_list(self) -> None:
@@ -178,36 +183,25 @@ class SurveyAnalyzer:
         for elem in self.data:
             ml_title_tmp = elem["ml_title"]
             al_title_tmp = elem["al_title"]
-            
+            il_title_tmp = elem["il_title"]
+
             # Handle morning lecture
-            if ml_title_tmp == "did not attend":
+            if ml_title_tmp == "DnA":
                 self.dna_morning += 1
             else:
                 self._append_answers(self.ml_results[ml_title_tmp], "ml_", elem, "ml_comment")
-                #for key in self.constants.answ_keys[:-1]:
-                #    self.ml_results[ml_title_tmp][key].append(elem[f"ml_{key}"])
-                #if "sugg_lectures" in elem:
-                #    self.ml_results[ml_title_tmp]["comments"].append(elem["sugg_lectures"]["ml_comment"])
             
             # Handle afternoon lecture
-            if al_title_tmp == "did not attend":
+            if al_title_tmp == "DnA":
                 self.dna_afternoon += 1
             else:
                 self._append_answers(self.al_results[al_title_tmp], "al_", elem, "al_comment")
-                #for key in self.constants.answ_keys[:-1]:
-                #    self.al_results[al_title_tmp][key].append(elem[f"al_{key}"])
-                #if "sugg_lectures" in elem:
-                #    self.al_results[al_title_tmp]["comments"].append(elem["sugg_lectures"]["al_comment"])
             
-            # Handle intermediate lecture
-            if elem["il_attended"] == False:
+            # Handle industry lecture
+            if il_title_tmp == "DnA":
                 self.dna_il += 1
             else:
-                self._append_answers(self.il_results, "il_", elem, "il_comment")
-                #for key in self.constants.answ_keys[:-1]:
-                #    self.il_results[key].append(elem[f"il_{key}"])
-                #if "sugg_lectures" in elem:
-                #    self.il_results["comments"].append(elem["sugg_lectures"]["il_comment"])
+                self._append_answers(self.il_results[il_title_tmp], "il_", elem, "il_comment")
             
             # Handle organization and topics suggestions
             if "sugg_organization" in elem:
@@ -427,7 +421,7 @@ class SurveyAnalyzer:
                 ax_stat.axis("off")
                 ax_stat.text(
                     0.0, 0.1,
-                    f"Mean and standard deviation: ${mean:.1f} \\pm {std:.1f}$",
+                    f"Mean and standard deviation: ${mean:.2f} \\pm {std:.2f}$",
                     transform=ax_stat.transAxes,
                     va="center", ha="left",
                     fontsize=8, color="black",
@@ -458,7 +452,10 @@ class SurveyAnalyzer:
         pdf_graphs.write(text=f"{title}\n\n")
         pdf_graphs.set_font("dejavu-sans", size=18)
         if overall:
-            pdf_graphs.write(text=f"A total of {total_count} questionnaires have been submitted and {dna} students did not attend the lecture(s).")
+            if dna == 0:
+                pdf_graphs.write(text=f"A total of {total_count} questionnaires have been submitted.")
+            else:
+                pdf_graphs.write(text=f"A total of {total_count} questionnaires have been submitted. {dna} students did not attend the lecture(s).")
         else:
             pdf_graphs.write(text=f"A total of {total_count} questionnaires have been submitted.")
         image_y = pdf_graphs.get_y() + 6
@@ -466,23 +463,11 @@ class SurveyAnalyzer:
         pdf_graphs.image(img_buf, x=image_x, y=image_y, w=pdf_graphs.w - 20)
         return io.BytesIO(pdf_graphs.output())
 
-    def _create_results_pdf(self, lecture_dict: Dict,path:str) -> None:
+    def _create_results_pdf(self, lecture_dict: Dict, path:str) -> None:
         """
         Create PDFs for the given lecture dictionary (ML/AL/IL or overall).
         """
-        if lecture_dict is self.il_results:
-            title = f"Survey Results for {self.il_title}"
-            total = len(lecture_dict["interesting"])
-            img_buf = self._create_likert_figure(lecture_dict, title)
-            pdf_output = self._write_pdf_with_graphs(title, total, img_buf, True, dna=self.dna_il)
-            figure_page = PdfReader(pdf_output).pages[0]
-            comment_page = PdfReader(self._create_comment_pdf(lecture_dict["comments"])).pages[0]
-            writer = PdfWriter()
-            writer.add_page(figure_page)
-            writer.add_page(comment_page)
-            output_path = path + f"results_{self.il_title.lower().replace(' ','_')}.pdf"
-            writer.write(output_path)
-        elif lecture_dict is self.overall_results:
+        if lecture_dict is self.overall_results:
             # overall survey results page
             img_buf = self._create_likert_figure(lecture_dict, "Overall Survey Results")
             pdf_output = self._write_pdf_with_graphs("Overall Survey Results", self.overall_count, img_buf)
@@ -503,8 +488,10 @@ class SurveyAnalyzer:
             afternoon_pages = PdfReader(pdf_output).pages[0]
 
             # read in other necessary pages
-            industry_pages = PdfReader(path + f"results_{self.il_title.lower().replace(' ','_')}.pdf").pages[0]
+            il_title_actual = list(self.il_title)[0]
+            industry_pages = PdfReader(path + f"results_{il_title_actual.lower().replace(' ','_')}.pdf").pages[0]
             comment_pages = PdfReader(self._create_orga_topic_pdf()).pages
+
             # write everythin to one output pdf 
             writer = PdfWriter()
             writer.add_page(overall_pages)
@@ -520,7 +507,10 @@ class SurveyAnalyzer:
                 title = f"Survey Results for {lecture}"
                 total = len(lecture_dict[lecture]["interesting"])
                 img_buf = self._create_likert_figure(lecture_dict[lecture], title)
-                pdf_output = self._write_pdf_with_graphs(title, total, img_buf)
+                if lecture_dict == self.il_results:
+                    pdf_output = self._write_pdf_with_graphs(title, total, img_buf, True, self.dna_il)
+                else:
+                    pdf_output = self._write_pdf_with_graphs(title, total, img_buf)
                 figure_page = PdfReader(pdf_output).pages[0]  
                 comment_page = PdfReader(self._create_comment_pdf(lecture_dict[lecture]["comments"])).pages[0]
                 writer = PdfWriter()
@@ -592,7 +582,7 @@ class SurveyAnalyzer:
         self._create_overall_results()
         self._calculate_lecture_statistics(self.ml_results)
         self._calculate_lecture_statistics(self.al_results)
-        self._calculate_lecture_statistics({self.il_title: self.il_results})
+        self._calculate_lecture_statistics(self.il_results)
 
         if not os.path.exists(self.path_out):
             os.makedirs(self.path_out, exist_ok=True)
