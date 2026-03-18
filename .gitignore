@@ -1,5 +1,8 @@
 pyvenv.cfg
-todos.md 
+todos.md
+.lock
+dist/
+build/
 survey_50.json
 __pycache__
 Lib/
