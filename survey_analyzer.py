@@ -17,8 +17,6 @@ from fpdf.enums import CellBordersLayout, TableCellFillMode
 
 from pypdf import PdfReader, PdfWriter
 from sentence_transformers import SentenceTransformer
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-MODEL_PATH = os.path.join(BASE_DIR, "models", "all-MiniLM-L6-v2")
 from sklearn.cluster import AgglomerativeClustering
 
 
@@ -70,7 +68,7 @@ class SurveyAnalyzer:
     def __init__(self, il_title: str = "IL1", data_path: str | None = None, output_path: str | None = None) -> None:
         # Change: allow passing an explicit data path to make the class easier to reuse/test.
         self.data, self.overall_count = self._read_data(data_path)
-        self.path_out = output_path+'/' if output_path is not None else sys.argv[2] + '/'
+        self.path_out = os.path.join(output_path if output_path is not None else sys.argv[2], "")
         self.ml_titles, self.al_titles = self._determine_lecture_titles()
         self.il_title = il_title
         self.constants = SurveyConstants()
@@ -85,8 +83,25 @@ class SurveyAnalyzer:
         self.dna_il = 0
         # Dictionaries containing mean and standard deviation for each question and lecture timeslot
         self.statistics = {}
-        self.language_model = SentenceTransformer(MODEL_PATH)
-        
+        self.BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+        self.MODEL_PATH = os.path.join(self.BASE_DIR, "models", "all-MiniLM-L6-v2")
+        self.language_model = SentenceTransformer(self.MODEL_PATH)
+        self.font_dir = os.path.join(self.BASE_DIR, "fonts")
+        self._add_custom_fonts()
+
+    def _add_custom_fonts(self):
+        pdf = FPDF()
+        pdf.add_font("dejavu-sans", style="", fname=os.path.join(self.font_dir, "DejaVuSans.ttf"))
+        pdf.add_font("dejavu-sans", style="B", fname=os.path.join(self.font_dir, "DejaVuSans-Bold.ttf"))
+        pdf.add_font("dejavu-sans", style="I", fname=os.path.join(self.font_dir, "DejaVuSans-Oblique.ttf"))
+        pdf.add_font("dejavu-sans", style="BI", fname=os.path.join(self.font_dir, "DejaVuSans-BoldOblique.ttf"))
+        self.pdf = pdf
+
+    def _append_answers(self, target: Dict[str, List], prefix: str, entry: Dict, comment_key: str | None = None) -> None:
+        for key in self.constants.answ_keys[:-1]:
+            target[key].append(entry[f"{prefix}{key}"])
+        if comment_key and "sugg_lectures" in entry:
+            target["comments"].append(entry["sugg_lectures"][comment_key])
 
     def _read_data(self, data_path: str | None = None) -> Tuple[List[Dict],int]:
         """
@@ -122,17 +137,18 @@ class SurveyAnalyzer:
     def _create_overall_results(self) -> None:
         # Change: avoid mutating keys and build the totals in a single pass.
         for question in self.constants.answ_keys[:-1]:
-            combined: List[int] = []
-            for ml_lecture, al_lecture in zip(self.ml_results.values(), self.al_results.values()):
-                combined.extend(ml_lecture[question])
-                combined.extend(al_lecture[question])
+            combined: list[int] = []
+            for title in self.ml_titles:
+                combined.extend(self.ml_results[title][question])
+            for title in self.al_titles:
+                combined.extend(self.al_results[title][question])
             combined.extend(self.il_results[question])
             self.overall_results[question] = combined
         self.overall_results.pop("comments", None)
 
     def _create_overall_morning(self):
         for question in self.constants.answ_keys[:-1]:
-            combined: List[int] = []
+            combined: list[int] = []
             for lecture in self.ml_results.values():
                 combined.extend(lecture[question])
             self.overall_morning[question]=combined
@@ -140,7 +156,7 @@ class SurveyAnalyzer:
 
     def _create_overall_afternoon(self):
         for question in self.constants.answ_keys[:-1]:
-            combined: List[int] = []
+            combined: list[int] = []
             for lecture in self.al_results.values():
                 combined.extend(lecture[question])
             self.overall_afternoon[question]=combined
@@ -167,28 +183,31 @@ class SurveyAnalyzer:
             if ml_title_tmp == "did not attend":
                 self.dna_morning += 1
             else:
-                for key in self.constants.answ_keys[:-1]:
-                    self.ml_results[ml_title_tmp][key].append(elem[f"ml_{key}"])
-                if "sugg_lectures" in elem:
-                    self.ml_results[ml_title_tmp]["comments"].append(elem["sugg_lectures"]["ml_comment"])
+                self._append_answers(self.ml_results[ml_title_tmp], "ml_", elem, "ml_comment")
+                #for key in self.constants.answ_keys[:-1]:
+                #    self.ml_results[ml_title_tmp][key].append(elem[f"ml_{key}"])
+                #if "sugg_lectures" in elem:
+                #    self.ml_results[ml_title_tmp]["comments"].append(elem["sugg_lectures"]["ml_comment"])
             
             # Handle afternoon lecture
             if al_title_tmp == "did not attend":
                 self.dna_afternoon += 1
             else:
-                for key in self.constants.answ_keys[:-1]:
-                    self.al_results[al_title_tmp][key].append(elem[f"al_{key}"])
-                if "sugg_lectures" in elem:
-                    self.al_results[al_title_tmp]["comments"].append(elem["sugg_lectures"]["al_comment"])
+                self._append_answers(self.al_results[al_title_tmp], "al_", elem, "al_comment")
+                #for key in self.constants.answ_keys[:-1]:
+                #    self.al_results[al_title_tmp][key].append(elem[f"al_{key}"])
+                #if "sugg_lectures" in elem:
+                #    self.al_results[al_title_tmp]["comments"].append(elem["sugg_lectures"]["al_comment"])
             
             # Handle intermediate lecture
-            if elem["il_attended"]:
-                for key in self.constants.answ_keys[:-1]:
-                    self.il_results[key].append(elem[f"il_{key}"])
-                if "sugg_lectures" in elem:
-                    self.il_results["comments"].append(elem["sugg_lectures"]["il_comment"])
-            else:
+            if elem["il_attended"] == False:
                 self.dna_il += 1
+            else:
+                self._append_answers(self.il_results, "il_", elem, "il_comment")
+                #for key in self.constants.answ_keys[:-1]:
+                #    self.il_results[key].append(elem[f"il_{key}"])
+                #if "sugg_lectures" in elem:
+                #    self.il_results["comments"].append(elem["sugg_lectures"]["il_comment"])
             
             # Handle organization and topics suggestions
             if "sugg_organization" in elem:
@@ -197,10 +216,10 @@ class SurveyAnalyzer:
                 self.topics.append(elem["sugg_topics"])
     
     def _change_pdf_font(self,pdf) -> None:
-        pdf.add_font("dejavu-sans", style="", fname="./fonts/DejaVuSans.ttf")
-        pdf.add_font("dejavu-sans", style="b", fname="./fonts/DejaVuSans-Bold.ttf")
-        pdf.add_font("dejavu-sans", style="i", fname="./fonts/DejaVuSans-Oblique.ttf")
-        pdf.add_font("dejavu-sans", style="bi", fname="./fonts/DejaVuSans-BoldOblique.ttf")
+        pdf.add_font("dejavu-sans", style="", fname=os.path.join(self.BASE_DIR, "fonts", "DejaVuSans.ttf"))
+        pdf.add_font("dejavu-sans", style="b", fname=os.path.join(self.BASE_DIR, "fonts", "DejaVuSans-Bold.ttf"))
+        pdf.add_font("dejavu-sans", style="i", fname=os.path.join(self.BASE_DIR, "fonts", "DejaVuSans-Oblique.ttf"))
+        pdf.add_font("dejavu-sans", style="bi", fname=os.path.join(self.BASE_DIR, "fonts", "DejaVuSans-BoldOblique.ttf"))
 
     # Adapted from author Sean Benoit, retrieved at 09/02/2026: Source - https://www.fpdf.org/en/script/script56.php
     def _create_comment_pdf(self, comments: List[str]) -> io.BytesIO:
@@ -366,10 +385,16 @@ class SurveyAnalyzer:
             results_arr = results_dict[question]
             n           = len(results_arr)
 
-            _, answers = np.unique(results_arr, return_counts=True)
-            pct        = np.round((answers / n) * 100, decimals=1)
-            pct_label  = [f"{k+1} ({pct[k]}%)" for k in range(len(pct)) if pct[k] != 0]
-            start_pct  = [pct[:j].sum() for j in range(len(pct))]
+            if n == 0:
+                pct = np.zeros(len(self._labels_for_question(question)))
+                pct_label = []
+            else:
+                _, answers = np.unique(results_arr, return_counts=True)
+                pct        = np.round((answers / n) * 100, decimals=1)
+                pct_label  = [f"{k+1} ({pct[k]}%)" for k in range(len(pct)) if pct[k] != 0]
+
+            # start_pct für die linke Position jeder gestapelten Bar
+            start_pct = np.concatenate([[0], np.cumsum(pct)[:-1]]) if len(pct) > 0 else np.array([])
 
             ax_bar.set_title(
                 f"Question {i+1}: {self.constants.answer_titles[i]}",
@@ -395,7 +420,7 @@ class SurveyAnalyzer:
             )
 
             # ── stats axes ────────────────────────────────────────────────────
-            if n>5:
+            if n > 5:
                 mean = np.mean(results_arr)
                 std  = np.std(results_arr)
 
@@ -411,7 +436,7 @@ class SurveyAnalyzer:
                 ax_stat.axis("off")
                 ax_stat.text(
                     0.0, 0.1,
-                    f"Not enough votes for meaningful statistics.",
+                    "Not enough votes for meaningful statistics.",
                     transform=ax_stat.transAxes,
                     va="center", ha="left",
                     fontsize=8, color="black",
@@ -462,18 +487,21 @@ class SurveyAnalyzer:
             img_buf = self._create_likert_figure(lecture_dict, "Overall Survey Results")
             pdf_output = self._write_pdf_with_graphs("Overall Survey Results", self.overall_count, img_buf)
             overall_pages = PdfReader(pdf_output).pages[0]
+
             # overall morning lectures results page
             self._create_overall_morning()
             img_buf = self._create_likert_figure(self.overall_morning, "Overall Morning Lecture Results")
-            total = len(self.overall_morning['interesting'])
+            total = len(self.overall_morning["interesting"])
             pdf_output = self._write_pdf_with_graphs("Overall Morning Lecture Results", total, img_buf, True, dna=self.dna_morning)
             morning_pages = PdfReader(pdf_output).pages[0]
+
             # overall afternoon lectures results page
             self._create_overall_afternoon()
             img_buf = self._create_likert_figure(self.overall_afternoon, "Overall Afternoon Lecture Results")
-            total = len(self.overall_afternoon['interesting'])
-            pdf_output = self._write_pdf_with_graphs("Overall Morning Lecture Results", total, img_buf, True, dna=self.dna_afternoon)
+            total = len(self.overall_afternoon["interesting"])
+            pdf_output = self._write_pdf_with_graphs("Overall Afternoon Lecture Results", total, img_buf, True, dna=self.dna_afternoon)
             afternoon_pages = PdfReader(pdf_output).pages[0]
+
             # read in other necessary pages
             industry_pages = PdfReader(path + f"results_{self.il_title.lower().replace(' ','_')}.pdf").pages[0]
             comment_pages = PdfReader(self._create_orga_topic_pdf()).pages
@@ -503,7 +531,7 @@ class SurveyAnalyzer:
 
     def _create_orga_topic_pdf(self) -> io.BytesIO:
         pdf_out = FPDF()
-        self._change_pdf_font(pdf_out)
+        self._change_pdf_font(pdf_out)   # <-- Fonts für dieses PDF registrieren
         
         # Get raw and clustered comments
         comments_orga_raw, comments_orga_clustered = self._comment_grouper(self.organization)
@@ -565,14 +593,14 @@ class SurveyAnalyzer:
         self._calculate_lecture_statistics(self.ml_results)
         self._calculate_lecture_statistics(self.al_results)
         self._calculate_lecture_statistics({self.il_title: self.il_results})
-        if os.path.exists(self.path_out):
-            self._create_results_pdf(self.ml_results, self.path_out)
-            self._create_results_pdf(self.al_results, self.path_out)
-            self._create_results_pdf(self.il_results, self.path_out)
-            self._create_results_pdf(self.overall_results, self.path_out)
-        else:
-            os.makedirs(self.path_out)
-            self._perform_automated_analysis()
+
+        if not os.path.exists(self.path_out):
+            os.makedirs(self.path_out, exist_ok=True)
+
+        self._create_results_pdf(self.ml_results, self.path_out)
+        self._create_results_pdf(self.al_results, self.path_out)
+        self._create_results_pdf(self.il_results, self.path_out)
+        self._create_results_pdf(self.overall_results, self.path_out)
 
     # This method is based on Tom Aarsen's agglomerative.py sample code, retrieved at 10.02.2026: Source - https://github.com/huggingface/sentence-transformers/blob/main/examples/sentence_transformer/applications/clustering/agglomerative.py
     def _comment_grouper(self, corpus: List[str]):
