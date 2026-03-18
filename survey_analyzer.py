@@ -14,6 +14,7 @@ import numpy as np
 from fpdf import FPDF
 from fpdf import FontFace
 from fpdf.enums import CellBordersLayout, TableCellFillMode
+
 from pypdf import PdfReader, PdfWriter
 from sentence_transformers import SentenceTransformer
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -83,6 +84,7 @@ class SurveyAnalyzer:
         # Dictionaries containing mean and standard deviation for each question and lecture timeslot
         self.statistics = {}
         self.language_model = SentenceTransformer(MODEL_PATH)
+        
 
     def _read_data(self, data_path: str | None = None) -> Tuple[List[Dict],int]:
         """
@@ -175,6 +177,12 @@ class SurveyAnalyzer:
                 self.organization.append(elem["sugg_organization"])
             if "sugg_topics" in elem:
                 self.topics.append(elem["sugg_topics"])
+    
+    def _change_pdf_font(self,pdf) -> None:
+        pdf.add_font("dejavu-sans", style="", fname="./fonts/DejaVuSans.ttf")
+        pdf.add_font("dejavu-sans", style="b", fname="./fonts/DejaVuSans-Bold.ttf")
+        pdf.add_font("dejavu-sans", style="i", fname="./fonts/DejaVuSans-Oblique.ttf")
+        pdf.add_font("dejavu-sans", style="bi", fname="./fonts/DejaVuSans-BoldOblique.ttf")
 
     # Adapted from author Sean Benoit, retrieved at 09/02/2026: Source - https://www.fpdf.org/en/script/script56.php
     def _create_comment_pdf(self, comments: List[str]) -> io.BytesIO:
@@ -183,14 +191,15 @@ class SurveyAnalyzer:
         """
         pdf = FPDF(orientation="landscape")
         pdf.add_page()
-        pdf.set_font("Helvetica", style="B", size=18)
+        self._change_pdf_font(pdf)
+        pdf.set_font("dejavu-sans", style="B", size=18)
         pdf.write(text="Comments \n\n")
         for txt in comments:
             if txt is None:
                 continue
             pdf.set_font("zapfdingbats", size=8)
             pdf.cell(w=5, h=5, text="l ")
-            pdf.set_font("Helvetica", size=11)
+            pdf.set_font("dejavu-sans", size=11)
             pdf.multi_cell(w=0, h=5, text=txt)
             pdf.ln()
         page_output = io.BytesIO(pdf.output())
@@ -235,6 +244,8 @@ class SurveyAnalyzer:
                     stds.append(None)
             self.statistics[lecture_title] = [means, stds]
 
+
+    # Depreceated, now displaying the mean and standard deviation directly under the horizontal bar plot using Matplotlib
     def _create_statistics_table_page(self, lecture_key: str) -> io.BytesIO:
         """Create a one-page PDF table of question means and standard deviations.
 
@@ -248,7 +259,8 @@ class SurveyAnalyzer:
 
         pdf_stats = FPDF(orientation="landscape")
         pdf_stats.add_page()
-        pdf_stats.set_font("Helvetica", style="B", size=18)
+        self._change_pdf_font(pdf_stats)
+        pdf_stats.set_font("dejavu-sans", style="B", size=18)
         pdf_stats.write(text="Question Statistics\n\n")
 
         # Two columns: Question label + Mean±Std value
@@ -288,11 +300,11 @@ class SurveyAnalyzer:
                         row.cell(f"{mean:.2f} ± {std:.2f}", border=CellBordersLayout.NONE)
 
         pdf_stats.ln(6)
-        pdf_stats.set_font("Helvetica", size=10)
+        pdf_stats.set_font("dejavu-sans", size=10)
         pdf_stats.write(text="Likert rating scheme: 1 (most negative) to 5 (most positive).\n")
 
         return io.BytesIO(pdf_stats.output())
-    
+
     def _create_likert_figure(self, results_dict: Dict[str, List[int]], title: str) -> io.BytesIO:
         # Landscape A4 in inches
         FIG_W, FIG_H = 11.69, 8.27
@@ -398,9 +410,10 @@ class SurveyAnalyzer:
         """
         pdf_graphs = FPDF(orientation="landscape")
         pdf_graphs.add_page()
-        pdf_graphs.set_font("Helvetica", style="B", size=18)
+        self._change_pdf_font(pdf_graphs)
+        pdf_graphs.set_font("dejavu-sans", style="B", size=18)
         pdf_graphs.write(text=f"{title}\n\n")
-        pdf_graphs.set_font("Helvetica", size=18)
+        pdf_graphs.set_font("dejavu-sans", size=18)
         if overall:
             pdf_graphs.write(text=f"A total of {self.overall_count} questionnaires have been submitted.")
             pdf_graphs.write(text=f'The percentages for each question are calculated based on the sum of it\'s been answered, i.e. {total_count}.')
@@ -432,17 +445,20 @@ class SurveyAnalyzer:
             total = len(lecture_dict["interesting"])
             img_buf = self._create_likert_figure(lecture_dict, title)
             pdf_output = self._write_pdf_with_graphs(title, total, img_buf, True)
+            figure_pages = PdfReader(pdf_output).pages[0]
+            comment_pages = PdfReader(self._create_orga_topic_pdf()).pages[0]
+            writer = PdfWriter()
+            writer.add_page(figure_pages)
+            writer.add_page(comment_pages)
             output_path = path + "results_overall.pdf"
-            # Change: write directly since there are no comments in overall results.
-            with open(output_path, "wb") as f:
-                f.write(pdf_output.getbuffer())
+            writer.write(output_path)
         else:
             for lecture in lecture_dict.keys():
                 title = f"Survey Results for {lecture}"
                 total = len(lecture_dict[lecture]["interesting"])
                 img_buf = self._create_likert_figure(lecture_dict[lecture], title)
                 pdf_output = self._write_pdf_with_graphs(title, total, img_buf)
-                figure_page = PdfReader(pdf_output).pages[0]
+                figure_page = PdfReader(pdf_output).pages[0]  
                 comment_page = PdfReader(self._create_comment_pdf(lecture_dict[lecture]["comments"])).pages[0]
                 writer = PdfWriter()
                 writer.add_page(figure_page)
@@ -450,8 +466,9 @@ class SurveyAnalyzer:
                 output_path = path + f"results_{lecture.lower().replace(' ','_')}.pdf"
                 writer.write(output_path)
 
-    def _create_orga_topic_pdf(self, path:str) -> None:
+    def _create_orga_topic_pdf(self) -> io.BytesIO:
         pdf_out = FPDF()
+        self._change_pdf_font(pdf_out)
         
         # Get raw and clustered comments
         comments_orga_raw, comments_orga_clustered = self._comment_grouper(self.organization)
@@ -459,50 +476,53 @@ class SurveyAnalyzer:
         
         # Page 1: Clustered General Comments
         pdf_out.add_page()
-        pdf_out.set_font("Helvetica", style="B", size=18)
+        pdf_out.set_font("dejavu-sans", style="B", size=18)
         pdf_out.write(text="Clustered General Comments\n\n")
+        pdf_out.set_font("dejavu-sans", size=10)
+        pdf_out.write(text="The clustering has been performed using the \"all-MiniLM-L6-v2\" sentence transformer model from https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2.\n")
         for txt in comments_orga_clustered:
             pdf_out.set_font("zapfdingbats", size=8)
             pdf_out.cell(w=5, h=5, text="l ")
-            pdf_out.set_font("Helvetica", size=11)
+            pdf_out.set_font("dejavu-sans", size=11)
             pdf_out.multi_cell(w=0, h=5, text=txt)
             pdf_out.ln()
         
         # Page 2: Clustered Topic Suggestions
         pdf_out.add_page()
-        pdf_out.set_font("Helvetica", style="B", size=18)
+        pdf_out.set_font("dejavu-sans", style="B", size=18)
         pdf_out.write(text="Clustered Topic Suggestions\n\n")
+        pdf_out.set_font("dejavu-sans", size=10)
+        pdf_out.write(text="The clustering has been performed using the \"all-MiniLM-L6-v2\" sentence transformer model from https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2.\n")
         for txt in comments_topics_clustered:
             pdf_out.set_font("zapfdingbats", size=8)
             pdf_out.cell(w=5, h=5, text="l ")
-            pdf_out.set_font("Helvetica", size=11)
+            pdf_out.set_font("dejavu-sans", size=11)
             pdf_out.multi_cell(w=0, h=5, text=txt)
             pdf_out.ln()
         
         # Page 3: Original General Comments
         pdf_out.add_page()
-        pdf_out.set_font("Helvetica", style="B", size=18)
+        pdf_out.set_font("dejavu-sans", style="B", size=18)
         pdf_out.write(text="Original General Comments\n\n")
         for txt in comments_orga_raw:
             pdf_out.set_font("zapfdingbats", size=5)
             pdf_out.cell(w=5, h=2, text="l ")
-            pdf_out.set_font("Helvetica", size=6)
+            pdf_out.set_font("dejavu-sans", size=6)
             pdf_out.multi_cell(w=0, h=2, text=txt)
             pdf_out.ln()
         
         # Page 4: Original Topic Suggestions
         pdf_out.add_page()
-        pdf_out.set_font("Helvetica", style="B", size=18)
+        pdf_out.set_font("dejavu-sans", style="B", size=18)
         pdf_out.write(text="Original Topic Suggestions\n\n")
         for txt in comments_topics_raw:
             pdf_out.set_font("zapfdingbats", size=5)
             pdf_out.cell(w=5, h=2, text="l ")
-            pdf_out.set_font("Helvetica", size=6)
+            pdf_out.set_font("dejavu-sans", size=6)
             pdf_out.multi_cell(w=0, h=2, text=txt)
             pdf_out.ln()
         
-        output_path = self.path_out + "comments_topics.pdf"
-        pdf_out.output(output_path)
+        return io.BytesIO(pdf_out.output())
 
     def _perform_automated_analysis(self) -> None:
         self._fill_results_list()
@@ -515,7 +535,7 @@ class SurveyAnalyzer:
             self._create_results_pdf(self.al_results, self.path_out)
             self._create_results_pdf(self.il_results, self.path_out)
             self._create_results_pdf(self.overall_results, self.path_out)
-            self._create_orga_topic_pdf(self.path_out)
+            self._create_orga_topic_pdf()
         else:
             os.makedirs(self.path_out)
             self._perform_automated_analysis()
