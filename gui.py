@@ -3,7 +3,6 @@ import os
 import webbrowser
 from CTkMessagebox import CTkMessagebox
 from survey_analyzer import SurveyAnalyzer
-from CTkToolTip import *
 
 class MainWindow(ctk.CTk):
     def __init__(self) -> None:
