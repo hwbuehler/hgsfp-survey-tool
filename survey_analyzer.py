@@ -96,17 +96,80 @@ class SurveyAnalyzer:
         pdf.add_font("dejavu-sans", style="BI", fname=os.path.join(self.font_dir, "DejaVuSans-BoldOblique.ttf"))
         self.pdf = pdf
 
+    def _is_meaningful_comment(self, comment: str | None) -> bool:
+        """Check if a comment is meaningful (not empty or just minimal characters)."""
+        if comment is None:
+            return False
+        comment_stripped = comment.strip()
+        if not comment_stripped:
+            return False
+        # Filter out comments that are just single punctuation characters
+        if comment_stripped in (".", "-", ",", ";", ":", "?", "!"):
+            return False
+        return True
+
+    def _segment_by_semantic_similarity(self, text, similarity_threshold: float = 0.0) -> List[str]:
+        """
+        Segment text into semantically distinct units using Sentence Transformer embeddings.
+
+        Accepts either a plain string (split on sentence boundaries internally) or a
+        pre-split list of parts (e.g. comma-separated topic suggestions). Adjacent parts
+        are merged when their cosine similarity is at or above *similarity_threshold*, and
+        kept as separate segments otherwise.
+
+        Args:
+            text: The text to segment, or a list of already-split candidate segments.
+            similarity_threshold: Cosine-similarity cutoff (0-1). Parts whose similarity
+                is *below* this value are treated as distinct segments.
+                Default 0.0 (almost never splits a plain string).
+
+        Returns:
+            List of semantically distinct segments.
+        """
+        if isinstance(text, list):
+            sentences = [s.strip() for s in text if s.strip()]
+        else:
+            import re
+            sentences = re.split(r'(?<=[.!?])\s+', text)
+            sentences = [s.strip() for s in sentences if s.strip()]
+        
+        if len(sentences) <= 1:
+            return sentences
+        
+        # Get embeddings for all sentences
+        embeddings = self.language_model.encode(sentences, convert_to_numpy=True)
+        
+        # Calculate similarity between adjacent sentences
+        segments = []
+        current_segment = sentences[0]
+        
+        for i in range(1, len(sentences)):
+            # Cosine similarity
+            similarity = np.dot(embeddings[i-1], embeddings[i]) / (
+                np.linalg.norm(embeddings[i-1]) * np.linalg.norm(embeddings[i])
+            )
+            
+            # If similarity is below threshold, start a new segment
+            if similarity < similarity_threshold:
+                segments.append(current_segment)
+                current_segment = sentences[i]
+            else:
+                current_segment += " " + sentences[i]
+        
+        segments.append(current_segment)
+        return segments
+
     def _append_answers(self, target: Dict[str, List], prefix: str, entry: Dict, comment_key: str | None = None) -> None:
         for key in self.constants.answ_keys[:-1]:
             target[key].append(entry[f"{prefix}{key}"])
         if comment_key and "sugg_lectures" in entry:
-            comment = entry["sugg_lectures"][comment_key]
-            # Split comma-separated suggestions into individual comments
-            if comment is not None:
-                suggestions = [s.strip() for s in comment.split(",")]
-                target["comments"].extend(suggestions)
-            else:
-                target["comments"].append(comment)
+            # Check if the comment_key exists in sugg_lectures before accessing
+            if comment_key in entry["sugg_lectures"]:
+                comment = entry["sugg_lectures"][comment_key]
+                # Only add meaningful comments; no semantic segmentation here —
+                # lecture comments are full sentences and should not be split apart.
+                if self._is_meaningful_comment(comment):
+                    target["comments"].append(comment)
 
     def _read_data(self, data_path: str | None = None) -> Tuple[List[Dict],int]:
         """
@@ -263,23 +326,45 @@ class SurveyAnalyzer:
         
         Args:
             results_dict: Dictionary with structure {lecture_title: {question: [answers]}}
-            
-        Returns:
-            Dictionary with structure {lecture_title: [[means for Q1-Q6], [stds for Q1-Q6]]}
         """
         for lecture_title, questions_dict in results_dict.items():
-            means = []
-            stds = []
+            # Use a dictionary to map questions to their stats for explicit ordering
+            stats_dict = {}
             for question in self.constants.answ_keys[:-1]:
                 results_arr = questions_dict[question]
                 n = len(results_arr)
                 if n > 5:
-                    means.append(float(np.mean(results_arr)))
-                    stds.append(float(np.std(results_arr)))
+                    mean = float(np.mean(results_arr))
+                    # Use ddof=1 for sample standard deviation (Bessel's correction)
+                    std = float(np.std(results_arr, ddof=1))
                 else:
-                    means.append(None)
-                    stds.append(None)
-            self.statistics[lecture_title] = [means, stds]
+                    mean = None
+                    std = None
+                stats_dict[question] = (mean, std)
+            self.statistics[lecture_title] = stats_dict
+
+    def _calculate_overall_statistics(self, results_dict: Dict[str, List[int]], key: str) -> None:
+        """
+        Calculate mean and standard deviation for a single overall results dictionary.
+        
+        Args:
+            results_dict: Dictionary with structure {question: [answers]}
+            key: Key to store statistics under (e.g., "Overall Results", "Overall Morning Lecture Results")
+        """
+        # Use a dictionary to map questions to their stats for explicit ordering
+        stats_dict = {}
+        for question in self.constants.answ_keys[:-1]:
+            results_arr = results_dict[question]
+            n = len(results_arr)
+            if n > 5:
+                mean = float(np.mean(results_arr))
+                # Use ddof=1 for sample standard deviation (Bessel's correction)
+                std = float(np.std(results_arr, ddof=1))
+            else:
+                mean = None
+                std = None
+            stats_dict[question] = (mean, std)
+        self.statistics[key] = stats_dict
 
 
     # Depreceated, now displaying the mean and standard deviation directly under the horizontal bar plot using Matplotlib
@@ -292,7 +377,7 @@ class SurveyAnalyzer:
 
         Below the table we add a note about the Likert scale.
         """
-        stats = self.statistics.get(lecture_key)
+        stats_dict = self.statistics.get(lecture_key)
 
         pdf_stats = FPDF(orientation="landscape")
         pdf_stats.add_page()
@@ -321,16 +406,15 @@ class SurveyAnalyzer:
             row.cell("Mean ± Std", border=CellBordersLayout.BOTTOM)
 
             # Data rows: each question gets its own row
-            if stats is None:
-                for question in self.constants.answer_titles:
-                    row = table.row()
-                    row.cell(question, border=CellBordersLayout.NONE)
+            for question_key in self.constants.answ_keys[:-1]:  # Excludes "comments"
+                row = table.row()
+                question_label = self.constants.answer_titles[self.constants.answ_keys[:-1].index(question_key)]
+                row.cell(question_label, border=CellBordersLayout.NONE)
+                
+                if stats_dict is None or question_key not in stats_dict:
                     row.cell("N/A", border=CellBordersLayout.NONE)
-            else:
-                means, stds = stats
-                for question, mean, std in zip(self.constants.answer_titles, means, stds):
-                    row = table.row()
-                    row.cell(question, border=CellBordersLayout.NONE)
+                else:
+                    mean, std = stats_dict[question_key]
                     if mean is None or std is None:
                         row.cell("N/A", border=CellBordersLayout.NONE)
                     else:
@@ -342,7 +426,7 @@ class SurveyAnalyzer:
 
         return io.BytesIO(pdf_stats.output())
 
-    def _create_likert_figure(self, results_dict: Dict[str, List[int]], title: str) -> io.BytesIO:
+    def _create_likert_figure(self, results_dict: Dict[str, List[int]], title: str, lecture_key: str | None = None) -> io.BytesIO:
         # Landscape A4 in inches
         FIG_W, FIG_H = 11.69, 8.27
 
@@ -364,6 +448,11 @@ class SurveyAnalyzer:
         WIDTH  = 0.94
 
         fig = plt.figure(figsize=(FIG_W, FIG_H))
+        
+        # Get precomputed statistics for this lecture
+        # Use lecture_key (original name) if provided, otherwise try title
+        stats_key = lecture_key if lecture_key is not None else title
+        stats_dict = self.statistics.get(stats_key)
 
         for i, question in enumerate(self.constants.answ_keys[:-1]):
             # Slots are numbered top-to-bottom, so invert for matplotlib's
@@ -387,11 +476,16 @@ class SurveyAnalyzer:
 
             if n == 0:
                 pct = np.zeros(len(self._labels_for_question(question)))
-                pct_label = []
+                pct_label = [""] * len(pct)
             else:
-                _, answers = np.unique(results_arr, return_counts=True)
-                pct        = np.round((answers / n) * 100, decimals=1)
-                pct_label  = [f"{k+1} ({pct[k]}%)" for k in range(len(pct)) if pct[k] != 0]
+                # Use bincount to always produce a count for every Likert value (1–5),
+                # even when some values are absent from the responses.
+                # np.unique would silently drop missing values, causing bars to receive
+                # wrong colors and labels (index-based k+1 ≠ actual Likert value).
+                counts    = np.bincount(results_arr, minlength=6)[1:]  # indices 1–5
+                pct       = np.round((counts / n) * 100, decimals=1)
+                pct_label = [f"{k+1} ({pct[k]}%)" if pct[k] != 0 else ""
+                             for k in range(5)]
 
             # start_pct für die linke Position jeder gestapelten Bar
             start_pct = np.concatenate([[0], np.cumsum(pct)[:-1]]) if len(pct) > 0 else np.array([])
@@ -421,8 +515,20 @@ class SurveyAnalyzer:
 
             # ── stats axes ────────────────────────────────────────────────────
             if n > 5:
-                mean = np.mean(results_arr)
-                std  = np.std(results_arr)
+                # Use precomputed statistics from self.statistics for consistency
+                # Look up stats by question name (not index) for correctness
+                mean = None
+                std = None
+                
+                if stats_dict is not None and question in stats_dict:
+                    mean_stats, std_stats = stats_dict[question]
+                    if mean_stats is not None:
+                        mean = mean_stats
+                        std = std_stats
+                
+                if mean is None:
+                    mean = np.mean(results_arr)
+                    std = np.std(results_arr, ddof=1)
 
                 ax_stat.axis("off")
                 ax_stat.text(
@@ -475,20 +581,18 @@ class SurveyAnalyzer:
         """
         if lecture_dict is self.overall_results:
             # overall survey results page
-            img_buf = self._create_likert_figure(lecture_dict, "Overall Survey Results")
-            pdf_output = self._write_pdf_with_graphs("Overall Survey Results", self.overall_count, img_buf)
+            img_buf = self._create_likert_figure(lecture_dict, "Overall Results", lecture_key="Overall Results")
+            pdf_output = self._write_pdf_with_graphs("Overall Results", self.overall_count, img_buf)
             overall_pages = PdfReader(pdf_output).pages[0]
 
             # overall morning lectures results page
-            self._create_overall_morning()
-            img_buf = self._create_likert_figure(self.overall_morning, "Overall Morning Lecture Results")
+            img_buf = self._create_likert_figure(self.overall_morning, "Overall Morning Lecture Results", lecture_key="Overall Morning Lecture Results")
             total = len(self.overall_morning["interesting"])
             pdf_output = self._write_pdf_with_graphs("Overall Morning Lecture Results", total, img_buf, True, dna=self.dna_morning)
             morning_pages = PdfReader(pdf_output).pages[0]
 
             # overall afternoon lectures results page
-            self._create_overall_afternoon()
-            img_buf = self._create_likert_figure(self.overall_afternoon, "Overall Afternoon Lecture Results")
+            img_buf = self._create_likert_figure(self.overall_afternoon, "Overall Afternoon Lecture Results", lecture_key="Overall Afternoon Lecture Results")
             total = len(self.overall_afternoon["interesting"])
             pdf_output = self._write_pdf_with_graphs("Overall Afternoon Lecture Results", total, img_buf, True, dna=self.dna_afternoon)
             afternoon_pages = PdfReader(pdf_output).pages[0]
@@ -512,7 +616,8 @@ class SurveyAnalyzer:
             for lecture in lecture_dict.keys():
                 title = f"Survey Results for {lecture}"
                 total = len(lecture_dict[lecture]["interesting"])
-                img_buf = self._create_likert_figure(lecture_dict[lecture], title)
+                # Pass the original lecture name for statistics lookup, not the modified title
+                img_buf = self._create_likert_figure(lecture_dict[lecture], title, lecture_key=lecture)
                 if lecture_dict == self.il_results:
                     pdf_output = self._write_pdf_with_graphs(title, total, img_buf, True, self.dna_il)
                 else:
@@ -530,8 +635,12 @@ class SurveyAnalyzer:
         self._change_pdf_font(pdf_out)   # <-- Fonts für dieses PDF registrieren
         
         # Get raw and clustered comments
-        comments_orga_raw, comments_orga_clustered = self._comment_grouper(self.organization)
-        comments_topics_raw, comments_topics_clustered = self._comment_grouper(self.topics)
+        comments_orga_raw, comments_orga_clustered = self._comment_grouper(
+            self.organization, use_semantic_split=False
+        )
+        comments_topics_raw, comments_topics_clustered = self._comment_grouper(
+            self.topics, use_semantic_split=True
+        )
         
         # Page 1: Clustered General Comments
         pdf_out.add_page()
@@ -586,9 +695,18 @@ class SurveyAnalyzer:
     def _perform_automated_analysis(self) -> None:
         self._fill_results_list()
         self._create_overall_results()
+        self._create_overall_morning()
+        self._create_overall_afternoon()
+        
+        # Calculate statistics for individual lectures
         self._calculate_lecture_statistics(self.ml_results)
         self._calculate_lecture_statistics(self.al_results)
         self._calculate_lecture_statistics(self.il_results)
+        
+        # Calculate statistics for overall results
+        self._calculate_overall_statistics(self.overall_results, "Overall Results")
+        self._calculate_overall_statistics(self.overall_morning, "Overall Morning Lecture Results")
+        self._calculate_overall_statistics(self.overall_afternoon, "Overall Afternoon Lecture Results")
 
         if not os.path.exists(self.path_out):
             os.makedirs(self.path_out, exist_ok=True)
@@ -599,14 +717,42 @@ class SurveyAnalyzer:
         self._create_results_pdf(self.overall_results, self.path_out)
 
     # This method is based on Tom Aarsen's agglomerative.py sample code, retrieved at 10.02.2026: Source - https://github.com/huggingface/sentence-transformers/blob/main/examples/sentence_transformer/applications/clustering/agglomerative.py
-    def _comment_grouper(self, corpus: List[str]):
+    def _comment_grouper(self, corpus: List[str], use_semantic_split: bool = False,
+                         split_similarity_threshold: float = 0.4):
+        """
+        Prepare *corpus* for agglomerative clustering and return both the raw and the
+        clustered comment lists.
+
+        Args:
+            corpus: Raw comment strings (may contain None entries).
+            use_semantic_split: When True, each comment is first split on commas to
+                obtain candidate segments, then adjacent segments are re-merged when
+                their cosine similarity is at or above *split_similarity_threshold*.
+                This is appropriate for topic suggestions, where a comma can either
+                separate two distinct topics or connect parts of the same thought.
+                When False (default), each response is kept intact — appropriate for
+                free-text organisation comments where commas are punctuation, not
+                topic separators.
+            split_similarity_threshold: Cosine-similarity threshold passed to
+                _segment_by_semantic_similarity when use_semantic_split is True.
+                Parts below this value are treated as distinct topics (default 0.4).
+        """
         corpus_masked = [x for x in corpus if x is not None]
-        # Split comma-separated suggestions into individual comments
         corpus_split = []
         for comment in corpus_masked:
-            # Split by comma and space, then strip whitespace from each part
-            suggestions = [s.strip() for s in comment.split(",")]
-            corpus_split.extend(suggestions)
+            if use_semantic_split:
+                # Split on commas to get candidate segments, then let semantic
+                # similarity decide which adjacent ones belong together.
+                parts = [p.strip() for p in comment.split(",") if p.strip()]
+                segments = self._segment_by_semantic_similarity(
+                    parts, similarity_threshold=split_similarity_threshold
+                )
+                corpus_split.extend(segments)
+            else:
+                # Keep the full response intact; commas are punctuation here.
+                stripped = comment.strip()
+                if stripped:
+                    corpus_split.append(stripped)
         corpus_embeddings = self.language_model.encode(corpus_split)
         clustering_model = AgglomerativeClustering(n_clusters=None, distance_threshold=0.4)
         clustering_model.fit(corpus_embeddings)
