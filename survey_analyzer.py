@@ -100,7 +100,13 @@ class SurveyAnalyzer:
         for key in self.constants.answ_keys[:-1]:
             target[key].append(entry[f"{prefix}{key}"])
         if comment_key and "sugg_lectures" in entry:
-            target["comments"].append(entry["sugg_lectures"][comment_key])
+            comment = entry["sugg_lectures"][comment_key]
+            # Split comma-separated suggestions into individual comments
+            if comment is not None:
+                suggestions = [s.strip() for s in comment.split(",")]
+                target["comments"].extend(suggestions)
+            else:
+                target["comments"].append(comment)
 
     def _read_data(self, data_path: str | None = None) -> Tuple[List[Dict],int]:
         """
@@ -595,14 +601,20 @@ class SurveyAnalyzer:
     # This method is based on Tom Aarsen's agglomerative.py sample code, retrieved at 10.02.2026: Source - https://github.com/huggingface/sentence-transformers/blob/main/examples/sentence_transformer/applications/clustering/agglomerative.py
     def _comment_grouper(self, corpus: List[str]):
         corpus_masked = [x for x in corpus if x is not None]
-        corpus_embeddings = self.language_model.encode(corpus_masked)
+        # Split comma-separated suggestions into individual comments
+        corpus_split = []
+        for comment in corpus_masked:
+            # Split by comma and space, then strip whitespace from each part
+            suggestions = [s.strip() for s in comment.split(",")]
+            corpus_split.extend(suggestions)
+        corpus_embeddings = self.language_model.encode(corpus_split)
         clustering_model = AgglomerativeClustering(n_clusters=None, distance_threshold=0.4)
         clustering_model.fit(corpus_embeddings)
         cluster_assignment = clustering_model.labels_
 
         clustered_sentences: Dict[int, List[str]] = {}
         for sentence_id, cluster_id in enumerate(cluster_assignment):
-            clustered_sentences.setdefault(cluster_id, []).append(corpus_masked[sentence_id])
+            clustered_sentences.setdefault(cluster_id, []).append(corpus_split[sentence_id])
 
         clustered_answers = []
         grouped_answers = []

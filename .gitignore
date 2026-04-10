@@ -3,6 +3,7 @@ todos.md
 .lock
 dist/
 build/
+misc/
 survey_50.json
 __pycache__
 Lib/
