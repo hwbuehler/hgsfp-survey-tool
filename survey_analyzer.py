@@ -340,7 +340,7 @@ class SurveyAnalyzer:
                 else:
                     mean = None
                     std = None
-                stats_dict[question] = (mean, std)
+                stats_dict[question] = (mean, std, n)
             self.statistics[lecture_title] = stats_dict
 
     def _calculate_overall_statistics(self, results_dict: Dict[str, List[int]], key: str) -> None:
@@ -363,7 +363,7 @@ class SurveyAnalyzer:
             else:
                 mean = None
                 std = None
-            stats_dict[question] = (mean, std)
+            stats_dict[question] = (mean, std, n)
         self.statistics[key] = stats_dict
 
 
@@ -414,7 +414,7 @@ class SurveyAnalyzer:
                 if stats_dict is None or question_key not in stats_dict:
                     row.cell("N/A", border=CellBordersLayout.NONE)
                 else:
-                    mean, std = stats_dict[question_key]
+                    mean, std, _ = stats_dict[question_key]
                     if mean is None or std is None:
                         row.cell("N/A", border=CellBordersLayout.NONE)
                     else:
@@ -519,13 +519,15 @@ class SurveyAnalyzer:
                 # Look up stats by question name (not index) for correctness
                 mean = None
                 std = None
-                
+                n_stat = n  # fallback: responses visible in this figure
+
                 if stats_dict is not None and question in stats_dict:
-                    mean_stats, std_stats = stats_dict[question]
+                    mean_stats, std_stats, n_stats = stats_dict[question]
                     if mean_stats is not None:
                         mean = mean_stats
                         std = std_stats
-                
+                        n_stat = n_stats
+
                 if mean is None:
                     mean = np.mean(results_arr)
                     std = np.std(results_arr, ddof=1)
@@ -533,7 +535,7 @@ class SurveyAnalyzer:
                 ax_stat.axis("off")
                 ax_stat.text(
                     0.0, 0.1,
-                    f"Mean and standard deviation: ${mean:.2f} \\pm {std:.2f}$",
+                    f"Mean and standard deviation: ${mean:.2f} \\pm {std:.2f}$ $(n={n_stat})$",
                     transform=ax_stat.transAxes,
                     va="center", ha="left",
                     fontsize=8, color="black",
@@ -692,6 +694,91 @@ class SurveyAnalyzer:
         
         return io.BytesIO(pdf_out.output())
 
+
+    def _create_all_lecture_comments_pdf(self) -> None:
+        """
+        Create a single PDF collecting the comments for every individual lecture,
+        grouped by timeslot (morning → afternoon → industry) and sorted by lecture
+        title within each group.
+
+        Each lecture gets a bold heading followed by a numbered bullet list of its
+        comments.  Lectures with no comments still appear with an explicit notice so
+        that the reader can see all lectures are accounted for.  The output file is
+        written to ``self.path_out`` as ``comments_all_lectures.pdf``.
+        """
+        # Build an ordered list of (group_label, lecture_title, comments) triples.
+        sections: List[Tuple[str, str, List[str]]] = []
+        for title in sorted(self.ml_titles):
+            sections.append(("Morning Lecture", title, self.ml_results[title]["comments"]))
+        for title in sorted(self.al_titles):
+            sections.append(("Afternoon Lecture", title, self.al_results[title]["comments"]))
+        for title in sorted(self.il_title):
+            sections.append(("Industry Lecture", title, self.il_results[title]["comments"]))
+
+        pdf = FPDF()
+        self._change_pdf_font(pdf)
+
+        current_group: str | None = None
+        for group_label, lecture_title, comments in sections:
+            # Start a new page for each new timeslot group.
+            if group_label != current_group:
+                pdf.add_page()
+                current_group = group_label
+                pdf.set_font("dejavu-sans", style="B", size=20)
+                pdf.write(text=f"{group_label} Comments\n\n")
+
+            # Lecture sub-heading.
+            pdf.set_font("dejavu-sans", style="B", size=14)
+            pdf.write(text=f"{lecture_title}\n")
+            pdf.ln(2)
+
+            meaningful = [c for c in comments if self._is_meaningful_comment(c)]
+            if not meaningful:
+                pdf.set_font("dejavu-sans", style="I", size=11)
+                pdf.write(text="No comments submitted for this lecture.\n")
+            else:
+                for idx, comment in enumerate(meaningful, start=1):
+                    # Numbered bullet: "1. <comment>"
+                    pdf.set_font("dejavu-sans", style="B", size=11)
+                    # Reserve space for the number prefix, then wrap the comment text.
+                    prefix = f"{idx}. "
+                    pdf.set_x(pdf.l_margin)
+                    pdf.cell(w=8, h=5, text=prefix)
+                    pdf.set_font("dejavu-sans", size=11)
+                    pdf.multi_cell(w=0, h=5, text=comment)
+                    pdf.ln(1)
+
+            pdf.ln(4)
+
+        output_path = self.path_out + "comments_all_lectures.pdf"
+        pdf.output(output_path)
+
+
+    def _combine_lecture_pdfs(self) -> None:
+        """
+        Merge all individual lecture feedback PDFs into a single file.
+
+        Pages are ordered morning → afternoon → industry, with lecture titles
+        sorted alphabetically within each group (matching the order produced by
+        _create_all_lecture_comments_pdf).  ``results_overall.pdf`` is explicitly
+        excluded.  The merged file is written to ``self.path_out`` as
+        ``results_all_lectures_combined.pdf``.
+        """
+        ordered_titles = (
+            [(t, self.path_out) for t in sorted(self.ml_titles)]
+            + [(t, self.path_out) for t in sorted(self.al_titles)]
+            + [(t, self.path_out) for t in sorted(self.il_title)]
+        )
+
+        writer = PdfWriter()
+        for lecture_title, path in ordered_titles:
+            pdf_path = path + f"results_{lecture_title.lower().replace(' ', '_')}.pdf"
+            for page in PdfReader(pdf_path).pages:
+                writer.add_page(page)
+
+        output_path = self.path_out + "results_all_lectures_combined.pdf"
+        writer.write(output_path)
+
     def _perform_automated_analysis(self) -> None:
         self._fill_results_list()
         self._create_overall_results()
@@ -715,10 +802,12 @@ class SurveyAnalyzer:
         self._create_results_pdf(self.al_results, self.path_out)
         self._create_results_pdf(self.il_results, self.path_out)
         self._create_results_pdf(self.overall_results, self.path_out)
+        self._create_all_lecture_comments_pdf()
+        self._combine_lecture_pdfs()
 
     # This method is based on Tom Aarsen's agglomerative.py sample code, retrieved at 10.02.2026: Source - https://github.com/huggingface/sentence-transformers/blob/main/examples/sentence_transformer/applications/clustering/agglomerative.py
     def _comment_grouper(self, corpus: List[str], use_semantic_split: bool = False,
-                         split_similarity_threshold: float = 0.4):
+                         split_similarity_threshold: float = 0.2):
         """
         Prepare *corpus* for agglomerative clustering and return both the raw and the
         clustered comment lists.
@@ -754,7 +843,7 @@ class SurveyAnalyzer:
                 if stripped:
                     corpus_split.append(stripped)
         corpus_embeddings = self.language_model.encode(corpus_split)
-        clustering_model = AgglomerativeClustering(n_clusters=None, distance_threshold=0.4)
+        clustering_model = AgglomerativeClustering(n_clusters=None, distance_threshold=0.5)
         clustering_model.fit(corpus_embeddings)
         cluster_assignment = clustering_model.labels_
 
