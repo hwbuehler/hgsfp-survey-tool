@@ -750,8 +750,17 @@ class SurveyAnalyzer:
 
             pdf.ln(4)
 
-        output_path = self.path_out + "comments_all_lectures.pdf"
-        pdf.output(output_path)
+        # Build the comments PDF in memory, then prepend the statistics overview
+        # so the combined file opens directly on the summary table.
+        comments_buf = io.BytesIO(pdf.output())
+        stats_buf    = self._create_statistics_overview_pdf()
+
+        writer = PdfWriter()
+        for page in PdfReader(stats_buf).pages:
+            writer.add_page(page)
+        for page in PdfReader(comments_buf).pages:
+            writer.add_page(page)
+        writer.write(self.path_out + "comments_all_lectures.pdf")
 
 
     def _combine_lecture_pdfs(self) -> None:
@@ -779,6 +788,143 @@ class SurveyAnalyzer:
         output_path = self.path_out + "results_all_lectures_combined.pdf"
         writer.write(output_path)
 
+
+    def _create_statistics_overview_pdf(self) -> io.BytesIO:
+        """
+        Create a single-page landscape PDF with a summary table of mean ± std for
+        every question and every lecture.
+
+        Layout
+        ------
+        Rows  : one per lecture, grouped as Morning → Afternoon → Industry, each group
+                followed by a "Group Average" summary row drawn from the pre-computed
+                overall morning / afternoon statistics.  A final "Overall" row covers
+                all lectures.  The industry lecture has no separate group average since
+                there is only one lecture in that slot.
+        Columns: Lecture name | Q1 … Q6 (abbreviated labels, full titles in footer).
+
+        The file is written to ``self.path_out`` as ``statistics_overview.pdf``.
+        """
+        questions      = self.constants.answ_keys[:-1]   # excludes "comments"
+        short_q_labels = ("Interesting", "New", "As Expected",
+                          "Exciting", "Structured", "Level")
+
+        def fmt_stat(stats_dict, question: str) -> str:
+            """Return 'mean ± std' string, or 'N/A' when data are insufficient."""
+            if stats_dict is None:
+                return "N/A"
+            entry = stats_dict.get(question)
+            if entry is None:
+                return "N/A"
+            mean, std, _ = entry
+            return "N/A" if mean is None else f"{mean:.2f} \u00b1 {std:.2f}"
+
+        pdf = FPDF(orientation="landscape")
+        pdf.add_page()
+        self._change_pdf_font(pdf)
+
+        pdf.set_font("dejavu-sans", style="B", size=18)
+        pdf.write(text="Statistics Summary\n\n")
+        pdf.set_font("dejavu-sans", size=9)
+        pdf.write(text=(
+            "Mean \u00b1 sample standard deviation (Bessel\u2019s correction, ddof\u00a0=\u00a01) "
+            "per question and lecture.  Cells show N/A when fewer than 6 responses were recorded.\n\n"
+        ))
+
+        table_width   = int(pdf.w - 2 * pdf.l_margin)
+        lecture_col_w = int(table_width * 0.18)
+        q_col_w       = int((table_width - lecture_col_w) / len(questions))
+        col_widths    = tuple([lecture_col_w] + [q_col_w] * len(questions))
+        n_cols        = len(questions) + 1   # lecture column + one per question
+
+        # Row styles
+        header_style  = FontFace(emphasis="BOLD", color=255,
+                                 fill_color=(50, 100, 160))
+        group_style   = FontFace(emphasis="BOLD",
+                                 fill_color=(180, 205, 230))
+        summary_style = FontFace(emphasis="BOLD",
+                                 fill_color=(210, 225, 245))
+        overall_style = FontFace(emphasis="BOLD",
+                                 fill_color=(140, 175, 215))
+
+        # Groups: (heading, sorted titles, overall-stats key or None)
+        groups = [
+            ("Morning Lectures",   sorted(self.ml_titles),
+             "Overall Morning Lecture Results"),
+            ("Afternoon Lectures", sorted(self.al_titles),
+             "Overall Afternoon Lecture Results"),
+            ("Industry Lecture",   sorted(self.il_title),
+             None),   # single lecture — no separate group average needed
+        ]
+
+        with pdf.table(
+            borders_layout="SINGLE_TOP_LINE",
+            cell_fill_color=(224, 235, 255),
+            cell_fill_mode=TableCellFillMode.ROWS,
+            col_widths=col_widths,
+            headings_style=header_style,
+            line_height=6,
+            text_align="CENTER",
+            width=table_width,
+        ) as table:
+
+            # ── column header row ─────────────────────────────────────────────
+            hrow = table.row()
+            hrow.cell("Lecture", align="LEFT")
+            for label in short_q_labels:
+                hrow.cell(label)
+
+            # ── one block per timeslot group ──────────────────────────────────
+            for group_name, lecture_titles, avg_key in groups:
+
+                # Full-width group header
+                grow = table.row(style=group_style)
+                grow.cell(group_name, colspan=n_cols, align="LEFT")
+
+                # Individual lecture rows
+                for title in lecture_titles:
+                    stats = self.statistics.get(title)
+                    lrow  = table.row()
+                    lrow.cell(title, align="LEFT")
+                    for q in questions:
+                        lrow.cell(fmt_stat(stats, q))
+
+                # Group average (skipped for industry since there is only one lecture)
+                if avg_key is not None:
+                    avg_stats = self.statistics.get(avg_key)
+                    arow = table.row(style=summary_style)
+                    arow.cell("Group Average", align="LEFT")
+                    for q in questions:
+                        arow.cell(fmt_stat(avg_stats, q))
+
+            # ── overall row ───────────────────────────────────────────────────
+            overall_stats = self.statistics.get("Overall Results")
+            orow = table.row(style=overall_style)
+            orow.cell("Overall", align="LEFT")
+            for q in questions:
+                orow.cell(fmt_stat(overall_stats, q))
+
+        # ── footer: question legend + scale note ──────────────────────────────
+        pdf.ln(4)
+        pdf.set_font("dejavu-sans", size=8)
+        legend = "  |  ".join(
+            f"Q{i+1} \u2013 {short}: {full}"
+            for i, (short, full) in enumerate(
+                zip(short_q_labels, self.constants.answer_titles)
+            )
+        )
+        pdf.multi_cell(w=0, h=4, text=legend)
+        pdf.ln(2)
+        pdf.write(text=(
+            "Likert rating scheme: 1 (most negative) to 5 (most positive).  "
+            "Individual n values are shown in the per-lecture Likert figures."
+        ))
+
+        pdf_bytes = io.BytesIO(pdf.output())
+        with open(self.path_out + "statistics_overview.pdf", "wb") as f:
+            f.write(pdf_bytes.getvalue())
+        return pdf_bytes
+
     def _perform_automated_analysis(self) -> None:
         self._fill_results_list()
         self._create_overall_results()
@@ -802,7 +948,7 @@ class SurveyAnalyzer:
         self._create_results_pdf(self.al_results, self.path_out)
         self._create_results_pdf(self.il_results, self.path_out)
         self._create_results_pdf(self.overall_results, self.path_out)
-        self._create_all_lecture_comments_pdf()
+        self._create_all_lecture_comments_pdf()  # also writes statistics_overview.pdf
         self._combine_lecture_pdfs()
 
     # This method is based on Tom Aarsen's agglomerative.py sample code, retrieved at 10.02.2026: Source - https://github.com/huggingface/sentence-transformers/blob/main/examples/sentence_transformer/applications/clustering/agglomerative.py
